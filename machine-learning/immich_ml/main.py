@@ -10,6 +10,7 @@ from functools import partial
 from typing import Any, AsyncGenerator, Callable, Iterator
 from zipfile import BadZipFile
 
+import numpy as np
 import orjson
 from fastapi import Depends, FastAPI, File, Form, HTTPException
 from fastapi.responses import ORJSONResponse, PlainTextResponse
@@ -163,6 +164,17 @@ def get_entries(entries: str = Form()) -> InferenceEntries:
         raise HTTPException(422, "Invalid request format.")
 
 
+def _ensure_contiguous(obj: Any) -> Any:
+    """Recursively ensure all numpy arrays are C-contiguous for orjson serialization."""
+    if isinstance(obj, np.ndarray):
+        return np.ascontiguousarray(obj)
+    if isinstance(obj, dict):
+        return {k: _ensure_contiguous(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_ensure_contiguous(v) for v in obj]
+    return obj
+
+
 app = FastAPI(lifespan=lifespan)
 
 
@@ -189,7 +201,7 @@ async def predict(
     else:
         raise HTTPException(400, "Either image or text must be provided")
     response = await run_inference(inputs, entries)
-    return ORJSONResponse(response)
+    return ORJSONResponse(_ensure_contiguous(response))
 
 
 async def run_inference(payload: Image | str, entries: InferenceEntries) -> InferenceResponse:
