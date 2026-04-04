@@ -207,7 +207,7 @@ class TextRecognizer(InferenceModel):
             if required_width <= bucket_width:
                 return bucket_width
 
-        log.warning(
+        log.debug(
             "OCR recognition width %s exceeds the largest RKNN bucket %s; clamping to the largest bucket.",
             required_width,
             self._bucket_widths[-1],
