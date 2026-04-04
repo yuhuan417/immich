@@ -86,18 +86,28 @@ static py::array align_layout(py::array arr, const rknn_tensor_attr& attr) {
 	py::buffer_info bi = arr.request();
 	if (bi.ndim != 4) return arr;
 	
-	auto matches = [&](uint32_t d1, uint32_t d2, uint32_t d3) -> bool {
+	auto matches_exact = [&](uint32_t d1, uint32_t d2, uint32_t d3) -> bool {
 		return bi.shape[1] == d1 && bi.shape[2] == d2 && bi.shape[3] == d3;
+	};
+	auto looks_like_nchw = [&](uint32_t channels, uint32_t height) -> bool {
+		return bi.shape[1] == channels && bi.shape[2] == height;
+	};
+	auto looks_like_nhwc = [&](uint32_t height, uint32_t channels) -> bool {
+		return bi.shape[1] == height && bi.shape[3] == channels;
 	};
 	
 	if (attr.fmt == RKNN_TENSOR_NHWC) {
-		if (matches(attr.dims[1], attr.dims[2], attr.dims[3])) return arr;
-		if (matches(attr.dims[3], attr.dims[1], attr.dims[2])) {
+		if (matches_exact(attr.dims[1], attr.dims[2], attr.dims[3]) || looks_like_nhwc(attr.dims[1], attr.dims[3])) {
+			return arr;
+		}
+		if (matches_exact(attr.dims[3], attr.dims[1], attr.dims[2]) || looks_like_nchw(attr.dims[3], attr.dims[1])) {
 			return py::array::ensure(arr.attr("transpose")(py::make_tuple(0, 2, 3, 1)), py::array::c_style);
 		}
 	} else if (attr.fmt == RKNN_TENSOR_NCHW) {
-		if (matches(attr.dims[1], attr.dims[2], attr.dims[3])) return arr;
-		if (matches(attr.dims[2], attr.dims[3], attr.dims[1])) {
+		if (matches_exact(attr.dims[1], attr.dims[2], attr.dims[3]) || looks_like_nchw(attr.dims[1], attr.dims[2])) {
+			return arr;
+		}
+		if (matches_exact(attr.dims[2], attr.dims[3], attr.dims[1]) || looks_like_nhwc(attr.dims[2], attr.dims[1])) {
 			return py::array::ensure(arr.attr("transpose")(py::make_tuple(0, 3, 1, 2)), py::array::c_style);
 		}
 	}
@@ -140,11 +150,30 @@ static int find_matching_shape(const rknn_input_range& rng, const std::vector<ui
 }
 
 static py::array make_output_array(const rknn_tensor_attr& attr, const rknn_output& out) {
+	const size_t elems = static_cast<size_t>(out.size) / sizeof(float);
 	std::vector<ssize_t> shape(attr.n_dims == 0 ? 1 : attr.n_dims);
 	if (attr.n_dims == 0) {
-		shape[0] = static_cast<ssize_t>(out.size / sizeof(float));
+		shape[0] = static_cast<ssize_t>(elems);
 	} else {
 		std::copy(attr.dims, attr.dims + attr.n_dims, shape.begin());
+		size_t expected_elems = 1;
+		for (uint32_t i = 0; i < attr.n_dims; ++i) {
+			expected_elems *= attr.dims[i];
+		}
+		if (expected_elems != elems) {
+			if (attr.n_dims == 3 && attr.dims[0] > 0 && attr.dims[2] > 0) {
+				const size_t denom = static_cast<size_t>(attr.dims[0]) * static_cast<size_t>(attr.dims[2]);
+				if (denom > 0 && elems % denom == 0) {
+					shape[0] = static_cast<ssize_t>(attr.dims[0]);
+					shape[1] = static_cast<ssize_t>(elems / denom);
+					shape[2] = static_cast<ssize_t>(attr.dims[2]);
+				} else {
+					shape.assign(1, static_cast<ssize_t>(elems));
+				}
+			} else {
+				shape.assign(1, static_cast<ssize_t>(elems));
+			}
+		}
 	}
 	py::array arr(py::dtype::of<float>(), shape);
 	std::memcpy(arr.mutable_data(), out.buf, out.size);
@@ -410,5 +439,3 @@ PYBIND11_MODULE(rknn_pool, m) {
 		.def("get_io_info", &NativeRKNNExecutor::get_io_info,
 		     "Return a dict with model IO info, including dynamic input ranges when available.");
 }
-
-
