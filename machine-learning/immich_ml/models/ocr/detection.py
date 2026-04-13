@@ -25,8 +25,12 @@ class TextDetector(InferenceModel):
     def __init__(self, model_name: str, **model_kwargs: Any) -> None:
         super().__init__(model_name.split("__")[-1], **model_kwargs)
         self.max_resolution = 736
-        self.mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-        self.std_inv = np.float32(1.0) / (np.array([0.5, 0.5, 0.5], dtype=np.float32) * 255.0)
+        # Align with Paddle NormalizeImage:
+        # scale=1/255, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        # This implementation works on raw 0..255 pixels, so we fold scale into mean/std:
+        # (x/255 - mean) / std == (x - mean*255) / (std*255)
+        self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32) * 255.0
+        self.std_inv = np.float32(1.0) / (np.array([0.229, 0.224, 0.225], dtype=np.float32) * 255.0)
         self._square_canvas = (736, 736)
         self._landscape_canvas = (736, 1280)
         self._portrait_canvas = (1280, 736)
