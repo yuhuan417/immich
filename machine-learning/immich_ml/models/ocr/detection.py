@@ -54,7 +54,7 @@ class TextDetector(InferenceModel):
         )
 
     def _download(self) -> None:
-        if self.model_format != ModelFormat.ONNX:
+        if self.model_format == ModelFormat.RKNN:
             try:
                 return super()._download()
             except Exception as exc:  # noqa: BLE001
@@ -84,14 +84,15 @@ class TextDetector(InferenceModel):
         DownloadFile.run(download_params)
 
     def _load(self) -> ModelSession:
-        if self.model_format == ModelFormat.ONNX:
-            return OrtSession(self.model_path_for_format(ModelFormat.ONNX))
+        if self.model_format == ModelFormat.RKNN:
+            session = self._make_session(self.model_path_for_format(self.model_format))
+            inputs = session.get_inputs()
+            if inputs:
+                self.input_name = inputs[0].name or self.input_name
+            return session
 
-        session = self._make_session(self.model_path_for_format(self.model_format))
-        inputs = session.get_inputs()
-        if inputs:
-            self.input_name = inputs[0].name or self.input_name
-        return session
+        # Keep the mainline behavior for non-RKNN backends.
+        return OrtSession(self.model_path_for_format(ModelFormat.ONNX))
 
     # partly adapted from RapidOCR
     def _predict(self, inputs: Image.Image) -> TextDetectionOutput:
@@ -99,12 +100,12 @@ class TextDetector(InferenceModel):
         if w < 32 or h < 32:
             return self._empty
 
-        if self.model_format == ModelFormat.ONNX:
-            out = self.session.run(None, {"x": self._transform(inputs)})[0]
-        else:
+        if self.model_format == ModelFormat.RKNN:
             transformed, transform_info = self._transform_rknn(inputs)
             out = self.session.run(None, {self.input_name: transformed})[0]
             out = self._crop_output(out, transform_info)
+        else:
+            out = self.session.run(None, {"x": self._transform(inputs)})[0]
 
         boxes, scores = self.postprocess(out, (h, w))
         if len(boxes) == 0:

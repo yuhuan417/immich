@@ -54,7 +54,7 @@ class TextRecognizer(InferenceModel):
         super().__init__(model_name, **model_kwargs, model_format=model_format)
 
     def _download(self) -> None:
-        if self.model_format != ModelFormat.ONNX:
+        if self.model_format == ModelFormat.RKNN:
             try:
                 return super()._download()
             except Exception as exc:  # noqa: BLE001
@@ -84,23 +84,24 @@ class TextRecognizer(InferenceModel):
         DownloadFile.run(download_params)
 
     def _load(self) -> ModelSession:
-        if self.model_format == ModelFormat.ONNX:
-            session = OrtSession(self.model_path_for_format(ModelFormat.ONNX))
-            self.model = RapidTextRecognizer(
-                OcrOptions(
-                    session=session.session,
-                    rec_batch_num=self.batch_size,
-                    rec_img_shape=(3, 48, 320),
-                    lang_type=self.language,
-                )
-            )
+        if self.model_format == ModelFormat.RKNN:
+            session = self._make_session(self.model_path_for_format(self.model_format))
+            inputs = session.get_inputs()
+            if inputs:
+                self.input_name = inputs[0].name or self.input_name
+            self.decoder = CTCLabelDecode(character_path=self._get_dict_path())
             return session
 
-        session = self._make_session(self.model_path_for_format(self.model_format))
-        inputs = session.get_inputs()
-        if inputs:
-            self.input_name = inputs[0].name or self.input_name
-        self.decoder = CTCLabelDecode(character_path=self._get_dict_path())
+        # Keep the mainline behavior for non-RKNN backends.
+        session = OrtSession(self.model_path_for_format(ModelFormat.ONNX))
+        self.model = RapidTextRecognizer(
+            OcrOptions(
+                session=session.session,
+                rec_batch_num=self.batch_size,
+                rec_img_shape=(3, 48, 320),
+                lang_type=self.language,
+            )
+        )
         return session
 
     def _get_dict_path(self) -> Path:
@@ -141,30 +142,30 @@ class TextRecognizer(InferenceModel):
         normalized_boxes[:, :, 0] /= img.width
         normalized_boxes[:, :, 1] /= img.height
 
-        if self.model_format == ModelFormat.ONNX:
-            rec = self.model(TextRecInput(img=self.get_crop_img_list(img, boxes)))
-            if rec.txts is None:
-                return self._empty
+        if self.model_format == ModelFormat.RKNN:
+            rec_texts, rec_scores = self._predict_batch(self.get_crop_img_list(img, boxes))
+            valid_score_idx = rec_scores > self.min_score
+            valid_score_idx_list = valid_score_idx.tolist()
 
-            text_scores = np.array(rec.scores, dtype=np.float32)
-            valid_text_score_idx = text_scores > self.min_score
-            valid_score_idx_list = valid_text_score_idx.tolist()
             return {
-                "box": normalized_boxes.reshape(-1, 8)[valid_text_score_idx].reshape(-1),
-                "text": [rec.txts[i] for i in range(len(rec.txts)) if valid_score_idx_list[i]],
-                "boxScore": box_scores[valid_text_score_idx],
-                "textScore": text_scores[valid_text_score_idx],
+                "box": normalized_boxes.reshape(-1, 8)[valid_score_idx].reshape(-1),
+                "text": [rec_texts[i] for i in range(len(rec_texts)) if valid_score_idx_list[i]],
+                "boxScore": box_scores[valid_score_idx],
+                "textScore": rec_scores[valid_score_idx],
             }
 
-        rec_texts, rec_scores = self._predict_batch(self.get_crop_img_list(img, boxes))
-        valid_score_idx = rec_scores > self.min_score
-        valid_score_idx_list = valid_score_idx.tolist()
+        rec = self.model(TextRecInput(img=self.get_crop_img_list(img, boxes)))
+        if rec.txts is None:
+            return self._empty
 
+        text_scores = np.array(rec.scores, dtype=np.float32)
+        valid_text_score_idx = text_scores > self.min_score
+        valid_score_idx_list = valid_text_score_idx.tolist()
         return {
-            "box": normalized_boxes.reshape(-1, 8)[valid_score_idx].reshape(-1),
-            "text": [rec_texts[i] for i in range(len(rec_texts)) if valid_score_idx_list[i]],
-            "boxScore": box_scores[valid_score_idx],
-            "textScore": rec_scores[valid_score_idx],
+            "box": normalized_boxes.reshape(-1, 8)[valid_text_score_idx].reshape(-1),
+            "text": [rec.txts[i] for i in range(len(rec.txts)) if valid_score_idx_list[i]],
+            "boxScore": box_scores[valid_text_score_idx],
+            "textScore": text_scores[valid_text_score_idx],
         }
 
     def _predict_batch(self, images: list[NDArray[np.uint8]]) -> tuple[list[str], NDArray[np.float32]]:
