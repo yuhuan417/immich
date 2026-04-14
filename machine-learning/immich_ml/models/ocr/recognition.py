@@ -47,10 +47,17 @@ class TextRecognizer(InferenceModel):
         }
         VisRes.__init__ = lambda self, **kwargs: None  # pyright: ignore[reportAttributeAccessIssue]
 
-        model_format = model_kwargs.pop(
-            "model_format",
-            ModelFormat.RKNN if rknn.is_available else ModelFormat.ONNX,
-        )
+        requested_model_format = model_kwargs.pop("model_format", None)
+        if requested_model_format == ModelFormat.RKNN:
+            model_format = ModelFormat.RKNN
+        elif requested_model_format in (None, ModelFormat.ONNX):
+            model_format = ModelFormat.RKNN if requested_model_format is None and rknn.is_available else ModelFormat.ONNX
+        else:
+            log.warning(
+                "%s is not supported for OCR recognition; using ONNX instead.",
+                requested_model_format.upper(),
+            )
+            model_format = ModelFormat.ONNX
         super().__init__(model_name, **model_kwargs, model_format=model_format)
 
     def _download(self) -> None:
@@ -78,14 +85,14 @@ class TextRecognizer(InferenceModel):
         download_params = DownloadFileInput(
             file_url=model_info["model_dir"],
             sha256=model_info["SHA256"],
-            save_path=self.model_path_for_format(ModelFormat.ONNX),
+            save_path=self.model_path,
             logger=log,
         )
         DownloadFile.run(download_params)
 
     def _load(self) -> ModelSession:
         if self.model_format == ModelFormat.RKNN:
-            session = self._make_session(self.model_path_for_format(self.model_format))
+            session = self._make_session(self.model_path)
             inputs = session.get_inputs()
             if inputs:
                 self.input_name = inputs[0].name or self.input_name
@@ -93,7 +100,7 @@ class TextRecognizer(InferenceModel):
             return session
 
         # Keep the mainline behavior for non-RKNN backends.
-        session = OrtSession(self.model_path_for_format(ModelFormat.ONNX))
+        session = OrtSession(self.model_path)
         self.model = RapidTextRecognizer(
             OcrOptions(
                 session=session.session,
