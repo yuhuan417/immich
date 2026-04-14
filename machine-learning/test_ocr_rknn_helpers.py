@@ -1,5 +1,6 @@
 import sys
 import types
+from unittest import mock
 
 import numpy as np
 from PIL import Image
@@ -29,6 +30,7 @@ rknn_pool.NativeRKNNExecutor = DummyNativeRKNNExecutor
 sys.modules.setdefault("immich_ml.sessions.rknn.native.rknn_pool", rknn_pool)
 
 from immich_ml.schemas import ModelFormat
+from immich_ml.models.ocr import recognition as recognition_model
 from immich_ml.sessions.rknn import ocr as rknn_ocr
 
 
@@ -65,3 +67,29 @@ def test_detection_transform_and_crop_follow_landscape_canvas() -> None:
     cropped = rknn_ocr.crop_detection_output(output, transform_info)
 
     assert cropped.shape == (1, 1, 160, 320)
+
+
+def test_text_recognizer_load_uses_rapidocr_for_onnx(monkeypatch) -> None:
+    ort_session = types.SimpleNamespace(session=object())
+    ort_ctor = mock.Mock(return_value=ort_session)
+    rapid_ctor = mock.Mock(return_value=object())
+
+    monkeypatch.setattr(recognition_model, "OrtSession", ort_ctor)
+    monkeypatch.setattr(recognition_model, "RapidTextRecognizer", rapid_ctor)
+    monkeypatch.setattr(recognition_model.InferenceModel, "download", lambda self: None)
+
+    recognizer = recognition_model.TextRecognizer(
+        "PP-OCRv5_mobile",
+        cache_dir="test_cache",
+        model_format=ModelFormat.ONNX,
+    )
+    recognizer.load()
+
+    ort_ctor.assert_called_once_with(recognizer.model_path)
+    rapid_ctor.assert_called_once()
+    options = rapid_ctor.call_args.args[0]
+    assert options["session"] is ort_session.session
+    assert options["rec_batch_num"] == 6
+    assert options["rec_img_shape"] == (3, 48, 320)
+    assert options.lang_type == recognizer.language
+    assert recognizer.rknn_runner is None

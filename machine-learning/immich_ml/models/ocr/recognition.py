@@ -5,17 +5,19 @@ from numpy.typing import NDArray
 from PIL import Image
 from rapidocr.ch_ppocr_rec import TextRecInput
 from rapidocr.ch_ppocr_rec import TextRecognizer as RapidTextRecognizer
-from rapidocr.utils.typings import LangRec
+from rapidocr.inference_engine.base import FileInfo, InferSession
+from rapidocr.utils.download_file import DownloadFile, DownloadFileInput
+from rapidocr.utils.typings import EngineType, LangRec, OCRVersion, TaskType
+from rapidocr.utils.typings import ModelType as RapidModelType
 from rapidocr.utils.vis_res import VisRes
 
-from immich_ml.config import settings
+from immich_ml.config import log, settings
 from immich_ml.models.base import InferenceModel
 from immich_ml.models.transforms import pil_to_cv2
 from immich_ml.schemas import ModelFormat, ModelSession, ModelTask, ModelType
 from immich_ml.sessions.ort import OrtSession
 from immich_ml.sessions.rknn.ocr import (
     RknnTextRecognitionRunner,
-    download_recognition_model,
     load_rknn_session,
     resolve_ocr_model_format,
 )
@@ -49,12 +51,35 @@ class TextRecognizer(InferenceModel):
         super().__init__(model_name, **model_kwargs, model_format=model_format)
 
     def _download(self) -> None:
-        self.model_format = download_recognition_model(
-            model_format=self.model_format,
-            model_name=self.model_name,
-            language=self.language,
-            save_path=self.model_path_for_format(ModelFormat.ONNX),
-            download_rknn=super()._download,
+        if self.model_format == ModelFormat.RKNN:
+            try:
+                super()._download()
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "Failed to download OCR recognition model '%s' for %s; falling back to ONNX if available.",
+                    self.model_name,
+                    self.model_format.upper(),
+                    exc_info=exc,
+                )
+                self.model_format = ModelFormat.ONNX
+
+        model_info = InferSession.get_model_url(
+            FileInfo(
+                engine_type=EngineType.ONNXRUNTIME,
+                ocr_version=OCRVersion.PPOCRV5,
+                task_type=TaskType.REC,
+                lang_type=self.language,
+                model_type=RapidModelType.MOBILE if "mobile" in self.model_name.lower() else RapidModelType.SERVER,
+            )
+        )
+        DownloadFile.run(
+            DownloadFileInput(
+                file_url=model_info["model_dir"],
+                sha256=model_info["SHA256"],
+                save_path=self.model_path,
+                logger=log,
+            )
         )
 
     def _load(self) -> ModelSession:

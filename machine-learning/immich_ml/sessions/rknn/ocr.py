@@ -11,7 +11,7 @@ from PIL import Image
 from rapidocr.ch_ppocr_rec.utils import CTCLabelDecode
 from rapidocr.inference_engine.base import FileInfo, InferSession
 from rapidocr.utils.download_file import DownloadFile, DownloadFileInput
-from rapidocr.utils.typings import EngineType, LangDet, LangRec, OCRVersion, TaskType
+from rapidocr.utils.typings import EngineType, LangRec, OCRVersion, TaskType
 from rapidocr.utils.typings import ModelType as RapidModelType
 
 from immich_ml.config import log
@@ -38,43 +38,6 @@ def resolve_ocr_model_format(requested_model_format: ModelFormat | None, *, comp
 
     log.warning("%s is not supported for %s; using ONNX instead.", str(requested_model_format).upper(), component)
     return ModelFormat.ONNX
-
-
-def download_detection_model(
-    *,
-    model_format: ModelFormat,
-    model_name: str,
-    save_path: Path,
-    download_rknn: Callable[[], None],
-) -> ModelFormat:
-    return _download_ocr_model(
-        model_format=model_format,
-        model_name=model_name,
-        save_path=save_path,
-        component="OCR detection",
-        task_type=TaskType.DET,
-        language=LangDet.CH,
-        download_rknn=download_rknn,
-    )
-
-
-def download_recognition_model(
-    *,
-    model_format: ModelFormat,
-    model_name: str,
-    language: LangRec,
-    save_path: Path,
-    download_rknn: Callable[[], None],
-) -> ModelFormat:
-    return _download_ocr_model(
-        model_format=model_format,
-        model_name=model_name,
-        save_path=save_path,
-        component="OCR recognition",
-        task_type=TaskType.REC,
-        language=language,
-        download_rknn=download_rknn,
-    )
 
 
 def load_rknn_session(
@@ -140,50 +103,6 @@ def _get_canvas_shape(img: Image.Image) -> tuple[int, int]:
 def _round_to_stride(value: float, limit: int, stride: int = 32) -> int:
     rounded = max(stride, int(round(value / stride) * stride))
     return min(limit, rounded)
-
-
-def _download_ocr_model(
-    *,
-    model_format: ModelFormat,
-    model_name: str,
-    save_path: Path,
-    component: str,
-    task_type: TaskType,
-    language: LangDet | LangRec,
-    download_rknn: Callable[[], None],
-) -> ModelFormat:
-    if model_format == ModelFormat.RKNN:
-        try:
-            download_rknn()
-            return ModelFormat.RKNN
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "Failed to download %s model '%s' for %s; falling back to ONNX if available.",
-                component,
-                model_name,
-                model_format.upper(),
-                exc_info=exc,
-            )
-
-    model_info = InferSession.get_model_url(
-        FileInfo(
-            engine_type=EngineType.ONNXRUNTIME,
-            ocr_version=OCRVersion.PPOCRV5,
-            task_type=task_type,
-            lang_type=language,
-            model_type=_get_rapid_model_type(model_name),
-        )
-    )
-    DownloadFile.run(
-        DownloadFileInput(
-            file_url=model_info["model_dir"],
-            sha256=model_info["SHA256"],
-            save_path=save_path,
-            logger=log,
-        )
-    )
-    return ModelFormat.ONNX
-
 
 class RknnTextRecognitionRunner:
     def __init__(self, *, model_dir: Path, model_name: str, language: LangRec, batch_size: int) -> None:

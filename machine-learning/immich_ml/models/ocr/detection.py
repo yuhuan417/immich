@@ -5,13 +5,17 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 from rapidocr.ch_ppocr_det.utils import DBPostProcess
+from rapidocr.inference_engine.base import FileInfo, InferSession
+from rapidocr.utils.download_file import DownloadFile, DownloadFileInput
+from rapidocr.utils.typings import EngineType, LangDet, OCRVersion, TaskType
+from rapidocr.utils.typings import ModelType as RapidModelType
 
+from immich_ml.config import log
 from immich_ml.models.base import InferenceModel
 from immich_ml.schemas import ModelFormat, ModelSession, ModelTask, ModelType
 from immich_ml.sessions.ort import OrtSession
 from immich_ml.sessions.rknn.ocr import (
     crop_detection_output,
-    download_detection_model,
     load_rknn_session,
     resolve_ocr_model_format,
     transform_detection_input,
@@ -52,11 +56,35 @@ class TextDetector(InferenceModel):
         )
 
     def _download(self) -> None:
-        self.model_format = download_detection_model(
-            model_format=self.model_format,
-            model_name=self.model_name,
-            save_path=self.model_path_for_format(ModelFormat.ONNX),
-            download_rknn=super()._download,
+        if self.model_format == ModelFormat.RKNN:
+            try:
+                super()._download()
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "Failed to download OCR detection model '%s' for %s; falling back to ONNX if available.",
+                    self.model_name,
+                    self.model_format.upper(),
+                    exc_info=exc,
+                )
+                self.model_format = ModelFormat.ONNX
+
+        model_info = InferSession.get_model_url(
+            FileInfo(
+                engine_type=EngineType.ONNXRUNTIME,
+                ocr_version=OCRVersion.PPOCRV5,
+                task_type=TaskType.DET,
+                lang_type=LangDet.CH,
+                model_type=RapidModelType.MOBILE if "mobile" in self.model_name.lower() else RapidModelType.SERVER,
+            )
+        )
+        DownloadFile.run(
+            DownloadFileInput(
+                file_url=model_info["model_dir"],
+                sha256=model_info["SHA256"],
+                save_path=self.model_path,
+                logger=log,
+            )
         )
 
     def _load(self) -> ModelSession:
