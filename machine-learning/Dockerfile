@@ -63,7 +63,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.15@sha256:a5727064a0de127bdb7c9d3c1383f3a9a
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --default-index https://pypi.tuna.tsinghua.edu.cn/simple --frozen --extra ${DEVICE} --no-dev --no-editable --no-install-project --compile-bytecode --no-progress --active --link-mode copy
+    uv sync --frozen --extra ${DEVICE} --no-dev --no-editable --no-install-project --compile-bytecode --no-progress --active --link-mode copy
 RUN if [ "$DEVICE" = "rocm" ]; then \
     uv pip install /opt/onnxruntime_rocm-*.whl; \
     fi
@@ -169,7 +169,6 @@ COPY scripts/healthcheck.py .
 COPY immich_ml immich_ml
 
 RUN if [ "$DEVICE" = "rknn" ]; then \
-sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources; \
         apt-get update; \
         apt-get install -y g++ libc6-dev; \
         cd immich_ml/sessions/rknn/native; \
