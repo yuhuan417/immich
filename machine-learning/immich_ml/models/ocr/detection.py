@@ -14,6 +14,7 @@ from immich_ml.config import log
 from immich_ml.models.base import InferenceModel
 from immich_ml.schemas import ModelFormat, ModelSession, ModelTask, ModelType
 from immich_ml.sessions import rknn
+from immich_ml.sessions.ort import OrtSession
 
 from .schemas import TextDetectionOutput
 
@@ -23,7 +24,11 @@ class TextDetector(InferenceModel):
     identity = (ModelType.DETECTION, ModelTask.OCR)
 
     def __init__(self, model_name: str, min_score: float = 0.5, **model_kwargs: Any) -> None:
-        super().__init__(model_name.split("__")[-1], **model_kwargs)
+        model_format = model_kwargs.pop(
+            "model_format",
+            ModelFormat.RKNN if rknn.is_available else ModelFormat.ONNX,
+        )
+        super().__init__(model_name.split("__")[-1], **model_kwargs, model_format=model_format)
         self.max_resolution = 736
         # Align with Paddle NormalizeImage:
         # scale=1/255, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
@@ -31,10 +36,10 @@ class TextDetector(InferenceModel):
         # (x/255 - mean) / std == (x - mean*255) / (std*255)
         self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32) * 255.0
         self.std_inv = np.float32(1.0) / (np.array([0.229, 0.224, 0.225], dtype=np.float32) * 255.0)
+        self.input_name = "x"
         self._square_canvas = (736, 736)
         self._landscape_canvas = (736, 1280)
         self._portrait_canvas = (1280, 736)
-        self.input_name = "x"
         self._empty: TextDetectionOutput = {
             "boxes": np.empty(0, dtype=np.float32),
             "scores": np.empty(0, dtype=np.float32),
@@ -48,10 +53,6 @@ class TextDetector(InferenceModel):
             score_mode="fast",
         )
 
-    @property
-    def _model_format_default(self) -> ModelFormat:
-        return ModelFormat.RKNN if rknn.is_available else ModelFormat.ONNX
-
     def _download(self) -> None:
         if self.model_format != ModelFormat.ONNX:
             try:
@@ -63,7 +64,7 @@ class TextDetector(InferenceModel):
                     self.model_format.upper(),
                     exc_info=exc,
                 )
-                return
+                self.model_format = ModelFormat.ONNX
 
         model_info = InferSession.get_model_url(
             FileInfo(
@@ -77,13 +78,16 @@ class TextDetector(InferenceModel):
         download_params = DownloadFileInput(
             file_url=model_info["model_dir"],
             sha256=model_info["SHA256"],
-            save_path=self.model_path,
+            save_path=self.model_path_for_format(ModelFormat.ONNX),
             logger=log,
         )
         DownloadFile.run(download_params)
 
     def _load(self) -> ModelSession:
-        session = self._make_session(self.model_path)
+        if self.model_format == ModelFormat.ONNX:
+            return OrtSession(self.model_path_for_format(ModelFormat.ONNX))
+
+        session = self._make_session(self.model_path_for_format(self.model_format))
         inputs = session.get_inputs()
         if inputs:
             self.input_name = inputs[0].name or self.input_name
@@ -94,9 +98,14 @@ class TextDetector(InferenceModel):
         w, h = inputs.size
         if w < 32 or h < 32:
             return self._empty
-        transformed, transform_info = self._transform(inputs)
-        out = self.session.run(None, {self.input_name: transformed})[0]
-        out = self._crop_output(out, transform_info)
+
+        if self.model_format == ModelFormat.ONNX:
+            out = self.session.run(None, {"x": self._transform(inputs)})[0]
+        else:
+            transformed, transform_info = self._transform_rknn(inputs)
+            out = self.session.run(None, {self.input_name: transformed})[0]
+            out = self._crop_output(out, transform_info)
+
         boxes, scores = self.postprocess(out, (h, w))
         if len(boxes) == 0:
             return self._empty
@@ -106,7 +115,27 @@ class TextDetector(InferenceModel):
         }
 
     # adapted from RapidOCR
-    def _transform(self, img: Image.Image) -> tuple[NDArray[np.float32], tuple[int, int, int, int]]:
+    def _transform(self, img: Image.Image) -> NDArray[np.float32]:
+        if img.height < img.width:
+            ratio = float(self.max_resolution) / img.height
+        else:
+            ratio = float(self.max_resolution) / img.width
+        ratio = min(ratio, 1.0)
+
+        resize_h = int(img.height * ratio)
+        resize_w = int(img.width * ratio)
+
+        resize_h = int(round(resize_h / 32) * 32)
+        resize_w = int(round(resize_w / 32) * 32)
+        resized_img = img.resize((int(resize_w), int(resize_h)), resample=Image.Resampling.LANCZOS)
+
+        img_np: NDArray[np.float32] = cv2.cvtColor(np.array(resized_img, dtype=np.float32), cv2.COLOR_RGB2BGR)  # type: ignore
+        img_np -= self.mean
+        img_np *= self.std_inv
+        img_np = np.transpose(img_np, (2, 0, 1))
+        return np.expand_dims(img_np, axis=0)
+
+    def _transform_rknn(self, img: Image.Image) -> tuple[NDArray[np.float32], tuple[int, int, int, int]]:
         canvas_h, canvas_w = self._get_canvas_shape(img)
         ratio = min(
             float(self.max_resolution) / min(img.height, img.width),

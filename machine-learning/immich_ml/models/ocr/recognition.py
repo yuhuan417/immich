@@ -6,19 +6,23 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
+from rapidocr.ch_ppocr_rec import TextRecInput
+from rapidocr.ch_ppocr_rec import TextRecognizer as RapidTextRecognizer
 from rapidocr.ch_ppocr_rec.utils import CTCLabelDecode
 from rapidocr.inference_engine.base import FileInfo, InferSession
 from rapidocr.utils.download_file import DownloadFile, DownloadFileInput
 from rapidocr.utils.typings import EngineType, LangRec, OCRVersion, TaskType
 from rapidocr.utils.typings import ModelType as RapidModelType
+from rapidocr.utils.vis_res import VisRes
 
 from immich_ml.config import log, settings
 from immich_ml.models.base import InferenceModel
 from immich_ml.models.transforms import pil_to_cv2
 from immich_ml.schemas import ModelFormat, ModelSession, ModelTask, ModelType
 from immich_ml.sessions import rknn
+from immich_ml.sessions.ort import OrtSession
 
-from .schemas import TextDetectionOutput, TextRecognitionOutput
+from .schemas import OcrOptions, TextDetectionOutput, TextRecognitionOutput
 
 
 class TextRecognizer(InferenceModel):
@@ -28,7 +32,8 @@ class TextRecognizer(InferenceModel):
     def __init__(self, model_name: str, min_score: float = 0.9, **model_kwargs: Any) -> None:
         self.language = LangRec[model_name.split("__")[0]] if "__" in model_name else LangRec.CH
         self.min_score = model_kwargs.get("minScore", min_score)
-        self.batch_size = settings.max_batch_size.text_recognition if settings.max_batch_size is not None else 6
+        max_batch_size = settings.max_batch_size and settings.max_batch_size.ocr
+        self.batch_size = max_batch_size if max_batch_size else 6
         self.input_name = "x"
         self.decoder: CTCLabelDecode | None = None
         self._bucket_widths = (320, 640, 960)
@@ -40,15 +45,13 @@ class TextRecognizer(InferenceModel):
             "text": [],
             "textScore": np.empty(0, dtype=np.float32),
         }
-        super().__init__(model_name, **model_kwargs)
+        VisRes.__init__ = lambda self, **kwargs: None  # pyright: ignore[reportAttributeAccessIssue]
 
-    @property
-    def _model_format_default(self) -> ModelFormat:
-        return ModelFormat.RKNN if rknn.is_available else ModelFormat.ONNX
-
-    @property
-    def _rapid_model_type(self) -> RapidModelType:
-        return RapidModelType.MOBILE if "mobile" in self.model_name.lower() else RapidModelType.SERVER
+        model_format = model_kwargs.pop(
+            "model_format",
+            ModelFormat.RKNN if rknn.is_available else ModelFormat.ONNX,
+        )
+        super().__init__(model_name, **model_kwargs, model_format=model_format)
 
     def _download(self) -> None:
         if self.model_format != ModelFormat.ONNX:
@@ -61,7 +64,7 @@ class TextRecognizer(InferenceModel):
                     self.model_format.upper(),
                     exc_info=exc,
                 )
-                return
+                self.model_format = ModelFormat.ONNX
 
         model_info = InferSession.get_model_url(
             FileInfo(
@@ -69,19 +72,31 @@ class TextRecognizer(InferenceModel):
                 ocr_version=OCRVersion.PPOCRV5,
                 task_type=TaskType.REC,
                 lang_type=self.language,
-                model_type=self._rapid_model_type,
+                model_type=RapidModelType.MOBILE if "mobile" in self.model_name else RapidModelType.SERVER,
             )
         )
         download_params = DownloadFileInput(
             file_url=model_info["model_dir"],
             sha256=model_info["SHA256"],
-            save_path=self.model_path,
+            save_path=self.model_path_for_format(ModelFormat.ONNX),
             logger=log,
         )
         DownloadFile.run(download_params)
 
     def _load(self) -> ModelSession:
-        session = self._make_session(self.model_path)
+        if self.model_format == ModelFormat.ONNX:
+            session = OrtSession(self.model_path_for_format(ModelFormat.ONNX))
+            self.model = RapidTextRecognizer(
+                OcrOptions(
+                    session=session.session,
+                    rec_batch_num=self.batch_size,
+                    rec_img_shape=(3, 48, 320),
+                    lang_type=self.language,
+                )
+            )
+            return session
+
+        session = self._make_session(self.model_path_for_format(self.model_format))
         inputs = session.get_inputs()
         if inputs:
             self.input_name = inputs[0].name or self.input_name
@@ -95,7 +110,7 @@ class TextRecognizer(InferenceModel):
                 ocr_version=OCRVersion.PPOCRV5,
                 task_type=TaskType.REC,
                 lang_type=self.language,
-                model_type=self._rapid_model_type,
+                model_type=RapidModelType.MOBILE if "mobile" in self.model_name else RapidModelType.SERVER,
             )
         )
         local_dict_path = InferSession.DEFAULT_MODEL_PATH / Path(dict_url).name
@@ -122,13 +137,28 @@ class TextRecognizer(InferenceModel):
         if boxes.shape[0] == 0:
             return self._empty
 
-        rec_texts, rec_scores = self._predict_batch(self.get_crop_img_list(img, boxes))
-        valid_score_idx = rec_scores > self.min_score
-        valid_score_idx_list = valid_score_idx.tolist()
-
         normalized_boxes = boxes.astype(np.float32, copy=True)
         normalized_boxes[:, :, 0] /= img.width
         normalized_boxes[:, :, 1] /= img.height
+
+        if self.model_format == ModelFormat.ONNX:
+            rec = self.model(TextRecInput(img=self.get_crop_img_list(img, boxes)))
+            if rec.txts is None:
+                return self._empty
+
+            text_scores = np.array(rec.scores, dtype=np.float32)
+            valid_text_score_idx = text_scores > self.min_score
+            valid_score_idx_list = valid_text_score_idx.tolist()
+            return {
+                "box": normalized_boxes.reshape(-1, 8)[valid_text_score_idx].reshape(-1),
+                "text": [rec.txts[i] for i in range(len(rec.txts)) if valid_score_idx_list[i]],
+                "boxScore": box_scores[valid_text_score_idx],
+                "textScore": text_scores[valid_text_score_idx],
+            }
+
+        rec_texts, rec_scores = self._predict_batch(self.get_crop_img_list(img, boxes))
+        valid_score_idx = rec_scores > self.min_score
+        valid_score_idx_list = valid_score_idx.tolist()
 
         return {
             "box": normalized_boxes.reshape(-1, 8)[valid_score_idx].reshape(-1),
@@ -146,9 +176,8 @@ class TextRecognizer(InferenceModel):
         width_list = [img.shape[1] / float(img.shape[0]) for img in images]
         indices = np.argsort(np.asarray(width_list, dtype=np.float32)).tolist()
         rec_res: list[tuple[str, float]] = [("", 0.0)] * len(images)
-        batch_size = self.batch_size or 1
-        for batch_indices, target_width in self._iter_batches(indices, width_list, batch_size):
 
+        for batch_indices, target_width in self._iter_batches(indices, width_list):
             norm_img_batch = np.concatenate(
                 [self._resize_norm_img(images[index], target_width)[np.newaxis, :] for index in batch_indices]
             ).astype(np.float32)
@@ -167,20 +196,11 @@ class TextRecognizer(InferenceModel):
         texts, scores = zip(*rec_res)
         return list(texts), np.asarray(scores, dtype=np.float32)
 
-    def _iter_batches(
-        self, indices: list[int], width_list: list[float], batch_size: int
-    ) -> list[tuple[list[int], int]]:
-        if self.model_format != ModelFormat.RKNN:
-            base_ratio = self._base_width / self._image_height
-            batches: list[tuple[list[int], int]] = []
-            for beg_img_no in range(0, len(indices), batch_size):
-                batch_indices = indices[beg_img_no : beg_img_no + batch_size]
-                max_wh_ratio = max([base_ratio, *[width_list[index] for index in batch_indices]])
-                batches.append((batch_indices, self._get_batch_width(max_wh_ratio)))
-            return batches
-
+    def _iter_batches(self, indices: list[int], width_list: list[float]) -> list[tuple[list[int], int]]:
         batches: list[tuple[list[int], int]] = []
         current = 0
+        batch_size = self.batch_size or 1
+
         while current < len(indices):
             batch_indices = [indices[current]]
             target_width = self._get_batch_width(width_list[indices[current]])
@@ -200,9 +220,6 @@ class TextRecognizer(InferenceModel):
 
     def _get_batch_width(self, max_wh_ratio: float) -> int:
         required_width = max(self._base_width, int(math.ceil(self._image_height * max_wh_ratio)))
-        if self.model_format != ModelFormat.RKNN:
-            return required_width
-
         for bucket_width in self._bucket_widths:
             if required_width <= bucket_width:
                 return bucket_width
