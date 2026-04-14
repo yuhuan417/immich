@@ -934,6 +934,7 @@ openvino = [
 ]
 rknn = [
     { name = "onnxruntime" },
+    { name = "pybind11" },
     { name = "rknn-toolkit-lite2" },
 ]
 rocm = [
@@ -997,6 +998,7 @@ requires-dist = [
     { name = "opencv-python-headless", specifier = ">=4.7.0.72,<5.0" },
     { name = "orjson", specifier = ">=3.9.5" },
     { name = "pillow", specifier = ">=12.1.1,<12.2" },
+    { name = "pybind11", marker = "extra == 'rknn'", specifier = ">=2.11.0,<4.0" },
     { name = "pydantic", specifier = ">=2.0.0,<3" },
     { name = "pydantic-settings", specifier = ">=2.5.2,<3" },
     { name = "python-multipart", specifier = ">=0.0.6,<1.0" },
@@ -2000,6 +2002,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/7c/b8/dc6ebfc030b47cccc5f5229eeb15e64142b4782796c3ce169ccd60b4d511/psutil-5.9.7-cp37-abi3-win32.whl", hash = "sha256:c727ca5a9b2dd5193b8644b9f0c883d54f1248310023b5ad3e92036c5e2ada68", size = 248406, upload-time = "2023-12-17T12:38:50.326Z" },
     { url = "https://files.pythonhosted.org/packages/50/28/92b74d95dd991c837813ffac0c79a581a3d129eb0fa7c1dd616d9901e0f3/psutil-5.9.7-cp37-abi3-win_amd64.whl", hash = "sha256:f37f87e4d73b79e6c5e749440c3113b81d1ee7d26f21c19c47371ddea834f414", size = 252245, upload-time = "2023-12-17T12:39:00.686Z" },
     { url = "https://files.pythonhosted.org/packages/ba/8a/000d0e80156f0b96c55bda6c60f5ed6543d7b5e893ccab83117e50de1400/psutil-5.9.7-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:032f4f2c909818c86cea4fe2cc407f1c0f0cde8e6c6d702b28b8ce0c0d143340", size = 246739, upload-time = "2023-12-17T11:25:57.305Z" },
+]
+
+[[package]]
+name = "pybind11"
+version = "3.0.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/41/50/b83d65efc1914681f5aded4ce37c703408a9bb74829f27f041560ca52ffb/pybind11-3.0.3.tar.gz", hash = "sha256:00471cdb816882c484708bc5dde80815c8c11cea540ab2cc6410f5ddea434755", size = 587814, upload-time = "2026-03-31T23:42:06.481Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ab/87/99f21e9b20899d6dc1bf7544cfe53e5fa17acc21bb267971a540425357d3/pybind11-3.0.3-py3-none-any.whl", hash = "sha256:fb5f8e4a64946b4dcc0451c83a8c384f803bc0a62dd1ba02f199e97dbc9aad4c", size = 313717, upload-time = "2026-03-31T23:42:04.814Z" },
 ]
 
 [[package]]

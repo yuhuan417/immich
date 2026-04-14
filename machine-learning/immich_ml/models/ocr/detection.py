@@ -13,7 +13,7 @@ from rapidocr.utils.typings import ModelType as RapidModelType
 from immich_ml.config import log
 from immich_ml.models.base import InferenceModel
 from immich_ml.schemas import ModelFormat, ModelSession, ModelTask, ModelType
-from immich_ml.sessions.ort import OrtSession
+from immich_ml.sessions import rknn
 
 from .schemas import TextDetectionOutput
 
@@ -23,7 +23,7 @@ class TextDetector(InferenceModel):
     identity = (ModelType.DETECTION, ModelTask.OCR)
 
     def __init__(self, model_name: str, min_score: float = 0.5, **model_kwargs: Any) -> None:
-        super().__init__(model_name.split("__")[-1], **model_kwargs, model_format=ModelFormat.ONNX)
+        super().__init__(model_name.split("__")[-1], **model_kwargs)
         self.max_resolution = 736
         # Align with Paddle NormalizeImage:
         # scale=1/255, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
@@ -31,6 +31,10 @@ class TextDetector(InferenceModel):
         # (x/255 - mean) / std == (x - mean*255) / (std*255)
         self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32) * 255.0
         self.std_inv = np.float32(1.0) / (np.array([0.229, 0.224, 0.225], dtype=np.float32) * 255.0)
+        self._square_canvas = (736, 736)
+        self._landscape_canvas = (736, 1280)
+        self._portrait_canvas = (1280, 736)
+        self.input_name = "x"
         self._empty: TextDetectionOutput = {
             "boxes": np.empty(0, dtype=np.float32),
             "scores": np.empty(0, dtype=np.float32),
@@ -44,7 +48,23 @@ class TextDetector(InferenceModel):
             score_mode="fast",
         )
 
+    @property
+    def _model_format_default(self) -> ModelFormat:
+        return ModelFormat.RKNN if rknn.is_available else ModelFormat.ONNX
+
     def _download(self) -> None:
+        if self.model_format != ModelFormat.ONNX:
+            try:
+                return super()._download()
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "Failed to download OCR detection model '%s' for %s; falling back to ONNX if available.",
+                    self.model_name,
+                    self.model_format.upper(),
+                    exc_info=exc,
+                )
+                return
+
         model_info = InferSession.get_model_url(
             FileInfo(
                 engine_type=EngineType.ONNXRUNTIME,
@@ -63,15 +83,20 @@ class TextDetector(InferenceModel):
         DownloadFile.run(download_params)
 
     def _load(self) -> ModelSession:
-        # TODO: support other runtime sessions
-        return OrtSession(self.model_path)
+        session = self._make_session(self.model_path)
+        inputs = session.get_inputs()
+        if inputs:
+            self.input_name = inputs[0].name or self.input_name
+        return session
 
     # partly adapted from RapidOCR
     def _predict(self, inputs: Image.Image) -> TextDetectionOutput:
         w, h = inputs.size
         if w < 32 or h < 32:
             return self._empty
-        out = self.session.run(None, {"x": self._transform(inputs)})[0]
+        transformed, transform_info = self._transform(inputs)
+        out = self.session.run(None, {self.input_name: transformed})[0]
+        out = self._crop_output(out, transform_info)
         boxes, scores = self.postprocess(out, (h, w))
         if len(boxes) == 0:
             return self._empty
@@ -81,25 +106,49 @@ class TextDetector(InferenceModel):
         }
 
     # adapted from RapidOCR
-    def _transform(self, img: Image.Image) -> NDArray[np.float32]:
-        if img.height < img.width:
-            ratio = float(self.max_resolution) / img.height
-        else:
-            ratio = float(self.max_resolution) / img.width
-        ratio = min(ratio, 1.0)
+    def _transform(self, img: Image.Image) -> tuple[NDArray[np.float32], tuple[int, int, int, int]]:
+        canvas_h, canvas_w = self._get_canvas_shape(img)
+        ratio = min(
+            float(self.max_resolution) / min(img.height, img.width),
+            float(canvas_h) / img.height,
+            float(canvas_w) / img.width,
+        )
 
-        resize_h = int(img.height * ratio)
-        resize_w = int(img.width * ratio)
-
-        resize_h = int(round(resize_h / 32) * 32)
-        resize_w = int(round(resize_w / 32) * 32)
+        resize_h = self._round_to_stride(img.height * ratio, canvas_h)
+        resize_w = self._round_to_stride(img.width * ratio, canvas_w)
         resized_img = img.resize((int(resize_w), int(resize_h)), resample=Image.Resampling.LANCZOS)
 
-        img_np: NDArray[np.float32] = cv2.cvtColor(np.array(resized_img, dtype=np.float32), cv2.COLOR_RGB2BGR)  # type: ignore
+        resized_np: NDArray[np.float32] = cv2.cvtColor(
+            np.array(resized_img, dtype=np.float32),
+            cv2.COLOR_RGB2BGR,
+        )  # type: ignore
+        img_np = np.zeros((canvas_h, canvas_w, 3), dtype=np.float32)
+        img_np[:resize_h, :resize_w, :] = resized_np
         img_np -= self.mean
         img_np *= self.std_inv
         img_np = np.transpose(img_np, (2, 0, 1))
-        return np.expand_dims(img_np, axis=0)
+        return np.expand_dims(img_np, axis=0), (canvas_h, canvas_w, resize_h, resize_w)
+
+    def _get_canvas_shape(self, img: Image.Image) -> tuple[int, int]:
+        ratio = img.width / float(img.height)
+        if 0.8 <= ratio <= 1.25:
+            return self._square_canvas
+        if ratio > 1:
+            return self._landscape_canvas
+        return self._portrait_canvas
+
+    @staticmethod
+    def _round_to_stride(value: float, limit: int, stride: int = 32) -> int:
+        rounded = max(stride, int(round(value / stride) * stride))
+        return min(limit, rounded)
+
+    @staticmethod
+    def _crop_output(output: NDArray[np.float32], transform_info: tuple[int, int, int, int]) -> NDArray[np.float32]:
+        canvas_h, canvas_w, resize_h, resize_w = transform_info
+        output_h, output_w = output.shape[-2:]
+        effective_h = max(1, min(output_h, int(round(output_h * resize_h / canvas_h))))
+        effective_w = max(1, min(output_w, int(round(output_w * resize_w / canvas_w))))
+        return output[..., :effective_h, :effective_w]
 
     def sorted_boxes(self, dt_boxes: NDArray[np.float32]) -> NDArray[np.float32]:
         if len(dt_boxes) == 0:
