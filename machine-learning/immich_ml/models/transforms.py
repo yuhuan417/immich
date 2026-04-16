@@ -77,4 +77,4 @@ def clean_text(text: str, canonicalize: bool = False) -> str:
 # this allows the client to use the array as a string without deserializing only to serialize back to a string
 # TODO: use this in a less invasive way
 def serialize_np_array(arr: NDArray[np.float32]) -> str:
-    return orjson.dumps(np.ascontiguousarray(arr), option=orjson.OPT_SERIALIZE_NUMPY).decode()
+    return orjson.dumps(arr, option=orjson.OPT_SERIALIZE_NUMPY).decode()
