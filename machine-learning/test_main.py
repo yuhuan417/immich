@@ -63,7 +63,7 @@ from immich_ml.schemas import (
 from immich_ml.sessions.ann import AnnSession
 from immich_ml.sessions.ort import Device, GraphSpec, OrtSession, flush_denormals, fresh, prepared
 from immich_ml.sessions.policy import ShapePolicy, batches, runs
-from immich_ml.sessions.rknn import RknnSession, run_inference
+from immich_ml.sessions.rknn import RknnSession
 from immich_ml.sessions.rknn import model_path as rknn_model_path
 
 
@@ -960,7 +960,7 @@ class TestRknnSession:
         mocker.patch("immich_ml.sessions.rknn.is_available", True)
         RknnSession(model_path)
 
-        rknn_session.assert_called_once_with(model_path=model_path.as_posix(), tpes=tpe, func=run_inference)
+        rknn_session.assert_called_once_with(model_path=model_path.as_posix(), tpes=tpe)
 
         info.assert_has_calls([mock.call(f"Loaded RKNN model from {model_path} with {tpe} threads.")])
 
